@@ -1,3 +1,5 @@
+name: Deploy RAG API to Kubernetes
+
 on:
   workflow_dispatch:
     inputs:
