@@ -23,12 +23,29 @@ from app.config import (
 )
 from app.middleware import security_middleware
 from app.routes import document_routes, pgvector_routes
-from app.services.database import PSQLDatabase, ensure_vector_indexes
+from app.services.database import PSQLDatabase, ensure_vector_indexes, create_embeddings_table
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic goes here
+    logger.info("=" * 60)
+    logger.info("=== RAG API Starting ===")
+    logger.info("=" * 60)
+
+    # Log important configuration
+    logger.info(f"Vector Store Type: {VECTOR_DB_TYPE.value}")
+    logger.info(f"DB Schema: {os.getenv('DB_SCHEMA', 'public')}")
+    logger.info(f"Embeddings Provider: {os.getenv('EMBEDDINGS_PROVIDER', 'openai')}")
+    logger.info(f"Chunk Size: {CHUNK_SIZE} | Chunk Overlap: {CHUNK_OVERLAP}")
+
+    # Log webhook configuration
+    webhook_url = os.getenv("LIBRECHAT_WEBHOOK_URL")
+    if webhook_url:
+        logger.info(f"LibreChat Webhook: ENABLED ({webhook_url})")
+    else:
+        logger.info("LibreChat Webhook: DISABLED (LIBRECHAT_WEBHOOK_URL not set)")
+
     # Create bounded thread pool executor based on CPU cores
     max_workers = min(
         int(os.getenv("RAG_THREAD_POOL_SIZE", str(os.cpu_count()))), 8
@@ -37,12 +54,21 @@ async def lifespan(app: FastAPI):
         max_workers=max_workers, thread_name_prefix="rag-worker"
     )
     logger.info(
-        f"Initialized thread pool with {max_workers} workers (CPU cores: {os.cpu_count()})"
+        f"Thread Pool: {max_workers} workers (CPU cores: {os.cpu_count()})"
     )
 
     if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
         await PSQLDatabase.get_pool()  # Initialize the pool
+
+        # Create namespace-based embeddings table if it doesn't exist
+        await create_embeddings_table()
+
+        # Keep old indexes for backward compatibility
         await ensure_vector_indexes()
+
+    logger.info("=" * 60)
+    logger.info("=== RAG API Ready ===")
+    logger.info("=" * 60)
 
     yield
 
@@ -79,17 +105,35 @@ if debug_mode:
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    body = await request.body()
     logger.debug(f"Validation error occurred")
-    logger.debug(f"Raw request body: {body.decode()}")
     logger.debug(f"Validation errors: {exc.errors()}")
+
+    # Build response content
+    response_content = {
+        "detail": exc.errors(),
+        "message": "Request validation failed",
+    }
+
+    # Only attempt to read body for JSON requests (not multipart/form-data)
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.body()
+            response_content["body"] = body.decode()
+            logger.debug(f"Raw request body: {body.decode()}")
+        except RuntimeError as e:
+            # Stream already consumed
+            logger.debug(f"Could not read request body: {e}")
+            response_content["body"] = None
+    else:
+        # For multipart/form-data or other types, don't attempt to read
+        # (stream is already consumed by FastAPI during parameter parsing)
+        response_content["body"] = None
+        logger.debug(f"Request body not included for content-type: {content_type}")
+
     return JSONResponse(
         status_code=422,
-        content={
-            "detail": exc.errors(),
-            "body": body.decode(),
-            "message": "Request validation failed",
-        },
+        content=response_content,
     )
 
 

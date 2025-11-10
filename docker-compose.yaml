@@ -13,8 +13,7 @@ services:
   fastapi:
     build: .
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
+      - DATABASE_URL=postgresql://myuser:mypassword@db:5432/mydatabase
     ports:
       - "8000:8000"
     volumes:

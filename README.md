@@ -13,6 +13,100 @@ The API will evolve over time to employ different querying/re-ranking methods, e
 - **Document Management**: Methods for adding, retrieving, and deleting documents.
 - **Vector Store**: Utilizes Langchain's vector store for efficient document retrieval.
 - **Asynchronous Support**: Offers async operations for enhanced performance.
+- **Namespace-Based Organization**: Organize embeddings by namespace/project for multi-tenant support.
+  - Automatic table creation per namespace
+  - Cross-namespace data isolation
+  - Configurable schema via `DB_SCHEMA` environment variable
+
+## Namespace Support
+
+The API supports organizing documents into **namespaces** for better multi-tenant and project-based organization. **Namespaces are optional** - if not specified, documents use the default `"general"` namespace.
+
+### Key Features:
+- **Per-namespace tables**: Each namespace gets its own table (e.g., `public.project_a`)
+- **Main embeddings table**: All namespaces also stored in central `public.embeddings` table
+- **Auto-copy to 'general'**: Documents automatically copied to 'general' namespace (unless namespace contains 'totalsoft')
+- **Configurable schema**: Use `DB_SCHEMA` environment variable to set PostgreSQL schema (default: `public`)
+- **Query filtering**: Queries filter results by namespace and optionally by file_id (source)
+- **DELETE isolation**: Delete operations are isolated per namespace - users can only delete documents from their own namespace
+- **Webhook callbacks**: Automatic POST callbacks to LibreChat after embedding completion with status updates
+
+### Providing Namespace
+
+Namespace can be provided in **three ways** with the following priority:
+
+1. **Request Body/Form Parameter** (highest priority)
+2. **HTTP Header `X-Namespace`** (medium priority)
+3. **Default Value**: `"general"` (lowest priority)
+
+This applies to endpoints: `/embed`, `/local/embed`, and `/query`
+
+### Usage Examples:
+
+```bash
+# 1. Upload document with namespace via form parameter
+curl -X POST "http://localhost:8000/embed" \
+  -F "file=@document.pdf" \
+  -F "file_id=doc-001" \
+  -F "namespace=project-alpha"
+
+# 2. Upload document with namespace via HTTP header
+curl -X POST "http://localhost:8000/embed" \
+  -H "X-Namespace: project-alpha" \
+  -F "file=@document.pdf" \
+  -F "file_id=doc-001"
+
+# 3. Upload without namespace (uses default "general")
+curl -X POST "http://localhost:8000/embed" \
+  -F "file=@document.pdf" \
+  -F "file_id=doc-001"
+
+# 4. Query within namespace via request body
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is this about?",
+    "file_id": "doc-001",
+    "namespace": "project-alpha",
+    "k": 3
+  }'
+
+# 5. Query within namespace via HTTP header
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -H "X-Namespace: project-alpha" \
+  -d '{
+    "query": "What is this about?",
+    "file_id": "doc-001",
+    "k": 3
+  }'
+
+# 6. Query in default namespace (searches "general")
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is this about?",
+    "file_id": "doc-001",
+    "k": 3
+  }'
+
+# 7. Priority example: Body parameter overrides header
+curl -X POST "http://localhost:8000/embed" \
+  -H "X-Namespace: project-beta" \
+  -F "namespace=project-alpha" \
+  -F "file=@document.pdf" \
+  -F "file_id=doc-001"
+# Result: Uses "project-alpha" from form parameter
+
+# 8. Delete documents with namespace isolation
+curl -X DELETE "http://localhost:8000/documents" \
+  -H "Content-Type: application/json" \
+  -H "X-Namespace: john_doe_example_com" \
+  -d '["doc-001", "doc-002"]'
+# Result: Only deletes documents from namespace "john_doe_example_com"
+```
+
+For detailed information, see [NAMESPACE_SCHEMA_GUIDE.md](NAMESPACE_SCHEMA_GUIDE.md).
 
 ## Setup
 
@@ -27,7 +121,7 @@ The API will evolve over time to employ different querying/re-ranking methods, e
   - Docker: `docker compose up` (also starts PSQL/pgvector)
     - or, use docker just for RAG API: `docker compose -f ./api-compose.yaml up`
   - Local:
-    - Make sure to setup `DB_HOST` to the correct database hostname
+    - Make sure to setup `DATABASE_URL` with the correct PostgreSQL connection string
     - Run the following commands (preferably in a [virtual environment](https://realpython.com/python-virtual-environments-a-primer/))
 ```bash
 pip install -r requirements.txt
@@ -44,17 +138,23 @@ The following environment variables are required to run the application:
 - `RAG_OPENAI_PROXY`: (Optional) Proxy for OpenAI API Embeddings
     - Note: When using with LibreChat, you can also set `HTTP_PROXY` and `HTTPS_PROXY` environment variables in the `docker-compose.override.yml` file (see [Proxy Configuration](#proxy-configuration) section below)
 - `VECTOR_DB_TYPE`: (Optional) select vector database type, default to `pgvector`.
-- `POSTGRES_USE_UNIX_SOCKET`: (Optional) Set to "True" when connecting to the PostgreSQL database server with Unix Socket.
-- `POSTGRES_DB`: (Optional) The name of the PostgreSQL database, used when `VECTOR_DB_TYPE=pgvector`.
-- `POSTGRES_USER`: (Optional) The username for connecting to the PostgreSQL database.
-- `POSTGRES_PASSWORD`: (Optional) The password for connecting to the PostgreSQL database.
-- `DB_HOST`: (Optional) The hostname or IP address of the PostgreSQL database server.
-- `DB_PORT`: (Optional) The port number of the PostgreSQL database server.
+- `DATABASE_URL`: PostgreSQL connection string for database connectivity. Format: `postgresql://user:password@host:port/database`
+    - Example: `postgresql://myuser:mypassword@localhost:5432/mydatabase`
+    - Required when `VECTOR_DB_TYPE=pgvector`
+    - Must start with `postgresql://` or `postgres://`
+- `DB_SCHEMA`: (Optional) The PostgreSQL schema name where tables will be created. Default value is "public".
+    - **Note**: Schema names are automatically converted to lowercase (PostgreSQL standard behavior for unquoted identifiers)
+    - Example: `DB_SCHEMA=MySchema` will create schema `myschema`
 - `RAG_HOST`: (Optional) The hostname or IP address where the API server will run. Defaults to "0.0.0.0"
 - `RAG_PORT`: (Optional) The port number where the API server will run. Defaults to port 8000.
 - `JWT_SECRET`: (Optional) The secret key used for verifying JWT tokens for requests.
   - The secret is only used for verification. This basic approach assumes a signed JWT from elsewhere.
   - Omit to run API without requiring authentication
+- `LIBRECHAT_WEBHOOK_URL`: (Optional) The base URL for sending webhook callbacks to LibreChat after embedding completion.
+  - Format: `http://librechat:3080` (will automatically append `/api/files/webhooks/embedding`)
+  - When set, RAG API will send POST requests with `{file_id, embedded: true/false, namespace, error?}` payload
+  - Useful for updating document status in LibreChat after embedding processing
+  - Omit to skip webhook callbacks
 
 - `COLLECTION_NAME`: (Optional) The name of the collection in the vector store. Default value is "testcollection".
 - `CHUNK_SIZE`: (Optional) The size of the chunks for text processing. Default value is "1500".
@@ -112,7 +212,7 @@ The `ATLAS_MONGO_DB_URI` could be the same or different from what is used by Lib
 {
   "fields": [
     {
-      "numDimensions": 1536,
+      "numDimensions": 768,
       "path": "embedding",
       "similarity": "cosine",
       "type": "vector"

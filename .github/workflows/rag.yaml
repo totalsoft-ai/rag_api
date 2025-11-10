@@ -1,0 +1,102 @@
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        type: choice
+        options:
+          - production
+          - dev
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set image tag based on environment
+        id: set-image-tag
+        run: |
+          if [ "${{ github.event.inputs.environment }}" == "production" ]; then
+            echo "IMAGE_TAG=latest-v1" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=dev-v1" >> $GITHUB_ENV
+          fi
+
+      - name: Create namespace if not exists
+        shell: bash
+        run: |
+          NAMESPACE="${{ vars.NAMESPACE }}"
+          if ! kubectl get namespace $NAMESPACE; then
+            kubectl create namespace $NAMESPACE
+          fi
+
+      - name: Image pull secret
+        shell: bash
+        run: |
+          kubectl create secret docker-registry registry-creds \
+            --namespace "${{ vars.NAMESPACE }}" \
+            --docker-server="${{ vars.REGISTRY }}" \
+            --docker-username="${{ secrets.REGISTRY_USERNAME }}" \
+            --docker-password="${{ secrets.REGISTRY_PASSWORD }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create config map
+        shell: bash
+        run: |
+          kubectl create configmap rag-agent-config \
+            --namespace "${{ vars.NAMESPACE }}" \
+            --from-literal=LOG_LEVEL="${{ vars.LOG_LEVEL || 'info' }}" \
+            --from-literal=DB_SCHEMA="${{ vars.DB_SCHEMA }}" \
+            --from-literal=VECTOR_DB_TYPE="${{ vars.VECTOR_DB_TYPE }}" \
+            --from-literal=EMBEDDINGS_PROVIDER="${{ vars.EMBEDDINGS_PROVIDER }}" \
+            --from-literal=EMBEDDINGS_MODEL="${{ vars.EMBEDDINGS_MODEL }}" \
+            --from-literal=EMBEDDINGS_CHUNK_SIZE="${{ vars.EMBEDDINGS_CHUNK_SIZE }}" \
+            --from-literal=OLLAMA_BASE_URL="${{ vars.OLLAMA_BASE_URL }}" \
+            --from-literal=CHUNK_SIZE="${{ vars.CHUNK_SIZE }}" \
+            --from-literal=CHUNK_OVERLAP="${{ vars.CHUNK_OVERLAP }}" \
+            --from-literal=RAG_UPLOAD_DIR="${{ vars.RAG_UPLOAD_DIR }}" \
+            --from-literal=PDF_EXTRACT_IMAGES="${{ vars.PDF_EXTRACT_IMAGES }}" \
+            --from-literal=DEBUG_RAG_API="${{ vars.DEBUG_RAG_API }}" \
+            --from-literal=TEXT_SEPARATORS="${{ vars.TEXT_SEPARATORS }}" \
+            --from-literal=LIBRECHAT_WEBHOOK_URL="${{ vars.LIBRECHAT_WEBHOOK_URL }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create secrets
+        shell: bash
+        run: |
+          kubectl create secret generic rag-secrets \
+            --namespace "${{ vars.NAMESPACE }}" \
+            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Build and push image
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          # Build Docker image
+          docker build -t "${{ vars.REGISTRY }}/rag-agent:${IMAGE_TAG}" .
+          docker push "${{ vars.REGISTRY }}/rag-agent:${IMAGE_TAG}"
+
+      - name: Apply manifests
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          export NAMESPACE="${{ vars.NAMESPACE }}"
+          export HOST="${{ vars.HOST }}"
+          export REGISTRY="${{ vars.REGISTRY }}"
+          export IMAGE_TAG="${IMAGE_TAG}"
+          envsubst < k8s/manifest.yaml | kubectl apply -f -
+
+      - name: Wait for rollout
+        shell: bash
+        run: |
+          kubectl rollout status deployment/rag-agent --namespace "${{ vars.NAMESPACE }}"

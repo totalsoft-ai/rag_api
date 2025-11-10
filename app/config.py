@@ -51,14 +51,21 @@ if not os.path.exists(RAG_UPLOAD_DIR):
 VECTOR_DB_TYPE = VectorDBType(
     get_env_variable("VECTOR_DB_TYPE", VectorDBType.PGVECTOR.value)
 )
-POSTGRES_USE_UNIX_SOCKET = (
-    get_env_variable("POSTGRES_USE_UNIX_SOCKET", "False").lower() == "true"
+
+# PostgreSQL connection via DATABASE_URL
+DATABASE_URL = get_env_variable(
+    "DATABASE_URL",
+    "postgresql://myuser:mypassword@db:5432/mydatabase",
+    required=False
 )
-POSTGRES_DB = get_env_variable("POSTGRES_DB", "mydatabase")
-POSTGRES_USER = get_env_variable("POSTGRES_USER", "myuser")
-POSTGRES_PASSWORD = get_env_variable("POSTGRES_PASSWORD", "mypassword")
-DB_HOST = get_env_variable("DB_HOST", "db")
-DB_PORT = get_env_variable("DB_PORT", "5432")
+
+# Validate DATABASE_URL format for PostgreSQL
+if DATABASE_URL and not DATABASE_URL.startswith(("postgresql://", "postgres://")):
+    raise ValueError(
+        f"Invalid DATABASE_URL format. Must start with 'postgresql://' or 'postgres://'. "
+        f"Got: {DATABASE_URL[:20]}..."
+    )
+
 COLLECTION_NAME = get_env_variable("COLLECTION_NAME", "testcollection")
 ATLAS_MONGO_DB_URI = get_env_variable(
     "ATLAS_MONGO_DB_URI", "mongodb://127.0.0.1:27018/LibreChat"
@@ -70,16 +77,46 @@ MONGO_VECTOR_COLLECTION = get_env_variable(
 CHUNK_SIZE = int(get_env_variable("CHUNK_SIZE", "1500"))
 CHUNK_OVERLAP = int(get_env_variable("CHUNK_OVERLAP", "100"))
 
+# Text splitting separators (in priority order)
+# Default separators respect punctuation and sentence boundaries
+DEFAULT_TEXT_SEPARATORS = [
+    "\n\n",  # Paragraphs (highest priority)
+    "\n",    # Line breaks
+    ". ",    # End of sentences
+    "! ",    # Exclamations
+    "? ",    # Questions
+    "; ",    # Semicolons
+    ": ",    # Colons
+    ", ",    # Commas
+    " ",     # Spaces (word boundaries)
+    "",      # Character-level (last resort)
+]
+
+# Allow customization via environment variable (comma-separated list)
+# Example: TEXT_SEPARATORS="\n\n,\n,. ,! ,? , ,"
+text_separators_env = get_env_variable("TEXT_SEPARATORS", None)
+if text_separators_env:
+    # Parse the comma-separated list and handle escaped newlines
+    TEXT_SEPARATORS = [
+        sep.replace("\\n", "\n") for sep in text_separators_env.split(",")
+    ]
+else:
+    TEXT_SEPARATORS = DEFAULT_TEXT_SEPARATORS
+
 env_value = get_env_variable("PDF_EXTRACT_IMAGES", "False").lower()
 PDF_EXTRACT_IMAGES = True if env_value == "true" else False
 
-if POSTGRES_USE_UNIX_SOCKET:
-    connection_suffix = f"{urllib.parse.quote_plus(POSTGRES_USER)}:{urllib.parse.quote_plus(POSTGRES_PASSWORD)}@/{urllib.parse.quote_plus(POSTGRES_DB)}?host={urllib.parse.quote_plus(DB_HOST)}"
-else:
-    connection_suffix = f"{urllib.parse.quote_plus(POSTGRES_USER)}:{urllib.parse.quote_plus(POSTGRES_PASSWORD)}@{DB_HOST}:{DB_PORT}/{urllib.parse.quote_plus(POSTGRES_DB)}"
+# Build connection strings from DATABASE_URL
+# DSN uses the standard postgresql:// scheme for asyncpg
+DSN = DATABASE_URL
 
-CONNECTION_STRING = f"postgresql+psycopg2://{connection_suffix}"
-DSN = f"postgresql://{connection_suffix}"
+# CONNECTION_STRING uses postgresql+psycopg2:// scheme for SQLAlchemy compatibility
+if DATABASE_URL.startswith("postgresql://"):
+    CONNECTION_STRING = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgres://"):
+    CONNECTION_STRING = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+else:
+    CONNECTION_STRING = DATABASE_URL
 
 ## Logging
 

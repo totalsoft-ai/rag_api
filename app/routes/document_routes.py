@@ -6,6 +6,7 @@ import aiofiles
 import aiofiles.os
 from shutil import copyfileobj
 from typing import List, Iterable
+from pydantic import BaseModel, Field
 from fastapi import (
     APIRouter,
     Request,
@@ -15,6 +16,7 @@ from fastapi import (
     Form,
     Body,
     Query,
+    Header,
     status,
 )
 from langchain_core.documents import Document
@@ -22,7 +24,7 @@ from langchain_core.runnables import run_in_executor
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from functools import lru_cache
 
-from app.config import logger, vector_store, RAG_UPLOAD_DIR, CHUNK_SIZE, CHUNK_OVERLAP
+from app.config import logger, vector_store, RAG_UPLOAD_DIR, CHUNK_SIZE, CHUNK_OVERLAP, TEXT_SEPARATORS
 from app.constants import ERROR_MESSAGES
 from app.models import (
     StoreDocument,
@@ -38,8 +40,21 @@ from app.utils.document_loader import (
     cleanup_temp_encoding_file,
 )
 from app.utils.health import is_health_ok
+from app.services.webhook import send_webhook_callback
 
 router = APIRouter()
+class DeleteDocumentsRequest(BaseModel):
+    """Request body for deleting documents by file_id within a namespace."""
+    document_ids: List[str] = Field(..., description="List of file_id values to delete from the current namespace")
+
+
+class DeleteDocumentsResponse(BaseModel):
+    """Response body for delete operation."""
+    message: str
+    namespace: str
+    deleted_count: int
+    requested_count: int
+
 
 
 def get_user_id(request: Request, entity_id: str = None) -> str:
@@ -214,27 +229,81 @@ async def get_documents_by_ids(request: Request, ids: list[str] = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/documents")
-async def delete_documents(request: Request, document_ids: List[str] = Body(...)):
-    try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
-                document_ids, executor=request.app.state.thread_pool
-            )
-            await vector_store.delete(
-                ids=document_ids, executor=request.app.state.thread_pool
-            )
-        else:
-            existing_ids = vector_store.get_filtered_ids(document_ids)
-            vector_store.delete(ids=document_ids)
+@router.delete("/documents", response_model=DeleteDocumentsResponse, summary="Delete documents by file_id in a namespace")
+async def delete_documents(
+    request: Request,
+    document_ids: List[str] = Body(
+        ...,
+        embed=True,
+        description="List of file_id values to delete",
+        examples={
+            "basic": {
+                "summary": "Delete two files",
+                "value": {"document_ids": ["file-123", "file-456"]},
+            }
+        },
+    ),
+    x_namespace: str = Header(None, alias="X-Namespace"),
+):
+    """Delete documents by file_id with namespace isolation.
 
-        if not all(id in existing_ids for id in document_ids):
-            raise HTTPException(status_code=404, detail="One or more IDs not found")
+    - Namespace is taken from `X-Namespace` header; defaults to `general`.
+    - Each ID in the list is treated as a `file_id`. Backwards compatibility: if a `file_id` looks like a path, a fallback check on `source` may be performed internally.
+    - Only documents within the specified namespace are deleted.
+
+    Returns counts and a message summarizing the operation.
+    """
+    from app.services.vector_store.namespace_pg_vector import NamespacePgVector
+    from app.config import embeddings
+
+    # Use namespace from header or default to 'general'
+    namespace = x_namespace or "general"
+
+    try:
+        logger.info(
+            "Deleting documents | IDs: %s | Namespace: %s",
+            document_ids,
+            namespace
+        )
+
+        # Use namespace-based vector store for isolation
+        ns_vector_store = NamespacePgVector(embeddings=embeddings, namespace=namespace)
+
+        # Delete each file by file_id within this namespace only
+        total_deleted = 0
+        for file_id in document_ids:
+            # Check if documents exist in this namespace
+            count = await ns_vector_store.count_by_file_id(file_id)
+            if count > 0:
+                await ns_vector_store.delete_by_file_id(file_id)
+                total_deleted += 1
+                logger.info(
+                    "Deleted file | File ID: %s | Namespace: %s | Chunks: %d",
+                    file_id,
+                    namespace,
+                    count
+                )
+            else:
+                logger.warning(
+                    "File not found in namespace | File ID: %s | Namespace: %s",
+                    file_id,
+                    namespace
+                )
+
+        if total_deleted == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No documents found in namespace '{namespace}'"
+            )
 
         file_count = len(document_ids)
         return {
-            "message": f"Documents for {file_count} file{'s' if file_count > 1 else ''} deleted successfully"
+            "message": f"Documents for {total_deleted} file{'s' if total_deleted > 1 else ''} deleted successfully",
+            "namespace": namespace,
+            "deleted_count": total_deleted,
+            "requested_count": file_count
         }
+
     except HTTPException as http_exc:
         logger.error(
             "HTTP Exception in delete_documents | Status: %d | Detail: %s",
@@ -244,8 +313,9 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
         raise http_exc
     except Exception as e:
         logger.error(
-            "Failed to delete documents | IDs: %s | Error: %s | Traceback: %s",
+            "Failed to delete documents | IDs: %s | Namespace: %s | Error: %s | Traceback: %s",
             document_ids,
+            namespace,
             str(e),
             traceback.format_exc(),
         )
@@ -262,7 +332,16 @@ def get_cached_query_embedding(query: str):
 async def query_embeddings_by_file_id(
     body: QueryRequestBody,
     request: Request,
+    x_namespace: str = Header(None, alias="X-Namespace"),
 ):
+    """Query embeddings with namespace support.
+
+    The namespace can be provided in the request body or via X-Namespace header.
+    Priority: Body > Header > Default ('general').
+    """
+    from app.services.vector_store.namespace_pg_vector import NamespacePgVector
+    from app.config import embeddings
+
     if not hasattr(request.state, "user"):
         user_authorized = body.entity_id if body.entity_id else "public"
     else:
@@ -273,48 +352,54 @@ async def query_embeddings_by_file_id(
     authorized_documents = []
 
     try:
-        embedding = get_cached_query_embedding(body.query)
+        # Priority: Body > Header > Default
+        namespace = body.namespace or x_namespace or "general"
+        ns_vector_store = NamespacePgVector(embeddings=embeddings, namespace=namespace)
 
-        if isinstance(vector_store, AsyncPgVector):
-            documents = await vector_store.asimilarity_search_with_score_by_vector(
-                embedding,
-                k=body.k,
-                filter={"file_id": body.file_id},
-                executor=request.app.state.thread_pool,
-            )
-        else:
-            documents = vector_store.similarity_search_with_score_by_vector(
-                embedding, k=body.k, filter={"file_id": body.file_id}
-            )
+        # Search in the specified namespace, filtering by file_id
+        documents = await ns_vector_store.similarity_search(
+            query=body.query,
+            k=body.k,
+            filter_file_id=body.file_id
+        )
 
         if not documents:
-            return authorized_documents
+            return []
 
-        document, score = documents[0]
-        doc_metadata = document.metadata
-        doc_user_id = doc_metadata.get("user_id")
+        # Convert to score format for backward compatibility
+        # Note: similarity_search returns documents with similarity in metadata
+        documents_with_scores = [
+            (doc, doc.metadata.get('similarity', 0.0))
+            for doc in documents
+        ]
 
-        if doc_user_id is None or doc_user_id == user_authorized:
-            authorized_documents = documents
-        else:
-            # If using entity_id and access denied, try again with user's actual ID
-            if body.entity_id and hasattr(request.state, "user"):
-                user_authorized = request.state.user.get("id")
-                if doc_user_id == user_authorized:
-                    authorized_documents = documents
-                else:
-                    if body.entity_id == doc_user_id:
-                        logger.warning(
-                            f"Entity ID {body.entity_id} matches document user_id but user {user_authorized} is not authorized"
-                        )
-                    else:
-                        logger.warning(
-                            f"Access denied for both entity ID {body.entity_id} and user {user_authorized} to document with user_id {doc_user_id}"
-                        )
+        # Authorization check on first document
+        if documents_with_scores:
+            document, score = documents_with_scores[0]
+            doc_metadata = document.metadata
+            doc_user_id = doc_metadata.get("user_id")
+
+            if doc_user_id is None or doc_user_id == user_authorized:
+                authorized_documents = documents_with_scores
             else:
-                logger.warning(
-                    f"Unauthorized access attempt by user {user_authorized} to a document with user_id {doc_user_id}"
-                )
+                # If using entity_id and access denied, try again with user's actual ID
+                if body.entity_id and hasattr(request.state, "user"):
+                    user_authorized = request.state.user.get("id")
+                    if doc_user_id == user_authorized:
+                        authorized_documents = documents_with_scores
+                    else:
+                        if body.entity_id == doc_user_id:
+                            logger.warning(
+                                f"Entity ID {body.entity_id} matches document user_id but user {user_authorized} is not authorized"
+                            )
+                        else:
+                            logger.warning(
+                                f"Access denied for both entity ID {body.entity_id} and user {user_authorized} to document with user_id {doc_user_id}"
+                            )
+                else:
+                    logger.warning(
+                        f"Unauthorized access attempt by user {user_authorized} to a document with user_id {doc_user_id}"
+                    )
 
         return authorized_documents
 
@@ -327,9 +412,10 @@ async def query_embeddings_by_file_id(
         raise http_exc
     except Exception as e:
         logger.error(
-            "Error in query embeddings | File ID: %s | Query: %s | Error: %s | Traceback: %s",
+            "Error in query embeddings | File ID: %s | Query: %s | Namespace: %s | Error: %s | Traceback: %s",
             body.file_id,
             body.query,
+            body.namespace,
             str(e),
             traceback.format_exc(),
         )
@@ -349,12 +435,31 @@ def generate_digest(page_content: str):
 async def store_data_in_vector_db(
     data: Iterable[Document],
     file_id: str,
+    source_path: str,
     user_id: str = "",
     clean_content: bool = False,
     executor=None,
+    namespace: str = "general",
 ) -> bool:
+    """Store documents in vector database with namespace support.
+
+    Args:
+        data: Documents to store
+        file_id: File UUID identifier (for MongoDB sync)
+        source_path: File path (for info/debugging)
+        user_id: User identifier
+        clean_content: Whether to clean the content (for PDFs)
+        executor: Thread pool executor for async operations
+        namespace: Namespace for organizing documents (default: 'general')
+    """
+    from app.services.vector_store.namespace_pg_vector import NamespacePgVector
+    from app.config import embeddings
+    from uuid import uuid4
+
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=TEXT_SEPARATORS,
     )
     documents = text_splitter.split_documents(data)
 
@@ -363,35 +468,47 @@ async def store_data_in_vector_db(
         for doc in documents:
             doc.page_content = clean_text(doc.page_content)
 
-    # Preparing documents with page content and metadata for insertion.
-    docs = [
-        Document(
-            page_content=doc.page_content,
-            metadata={
-                "file_id": file_id,
-                "user_id": user_id,
-                "digest": generate_digest(doc.page_content),
-                **(doc.metadata or {}),
-            },
+    # Preparing documents with page content and metadata for insertion using new schema
+    docs = []
+    for idx, doc in enumerate(documents):
+        chunk_id = str(uuid4())  # Generate unique chunk_id
+        docs.append(
+            Document(
+                page_content=doc.page_content,
+                metadata={
+                    "chunk_id": chunk_id,
+                    "file_id": file_id,  # UUID for file (MongoDB sync)
+                    "source": source_path,  # File path for info
+                    "chunk_index": idx,
+                    "user_id": user_id,
+                    "digest": generate_digest(doc.page_content),
+                    **(doc.metadata or {}),
+                },
+            )
         )
-        for doc in documents
-    ]
 
     try:
-        if isinstance(vector_store, AsyncPgVector):
-            ids = await vector_store.aadd_documents(
-                docs, ids=[file_id] * len(documents), executor=executor
-            )
-        else:
-            ids = vector_store.add_documents(docs, ids=[file_id] * len(documents))
+        # Use namespace-based vector store
+        ns_vector_store = NamespacePgVector(embeddings=embeddings, namespace=namespace)
 
-        return {"message": "Documents added successfully", "ids": ids}
+        # Copy to 'general' namespace if not 'totalsoft' related
+        copy_to_general = namespace != 'general' and 'totalsoft' not in namespace.lower()
+
+        await ns_vector_store.upsert_documents(
+            documents=docs,
+            chunk_indices=[doc.metadata["chunk_index"] for doc in docs],
+            copy_to_general=copy_to_general
+        )
+
+        chunk_ids = [doc.metadata["chunk_id"] for doc in docs]
+        return {"message": "Documents added successfully", "ids": chunk_ids}
 
     except Exception as e:
         logger.error(
-            "Failed to store data in vector DB | File ID: %s | User ID: %s | Error: %s | Traceback: %s",
+            "Failed to store data in vector DB | File ID: %s | User ID: %s | Namespace: %s | Error: %s | Traceback: %s",
             file_id,
             user_id,
+            namespace,
             str(e),
             traceback.format_exc(),
         )
@@ -400,8 +517,14 @@ async def store_data_in_vector_db(
 
 @router.post("/local/embed")
 async def embed_local_file(
-    document: StoreDocument, request: Request, entity_id: str = None
+    document: StoreDocument,
+    request: Request,
+    entity_id: str = None,
+    x_namespace: str = Header(None, alias="X-Namespace"),
 ):
+    # Priority: Body (StoreDocument) > Header > Default
+    effective_namespace = document.namespace or x_namespace or "general"
+
     # Check if the file exists
     if not os.path.exists(document.filepath):
         raise HTTPException(
@@ -424,14 +547,22 @@ async def embed_local_file(
         cleanup_temp_encoding_file(loader)
 
         result = await store_data_in_vector_db(
-            data,
-            document.file_id,
-            user_id,
+            data=data,
+            file_id=document.file_id,
+            source_path=document.filepath,
+            user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
+            namespace=effective_namespace,
         )
 
         if result:
+            # Success! Send webhook callback
+            await send_webhook_callback(
+                file_id=document.file_id,
+                embedded=True,
+                namespace=effective_namespace
+            )
             return {
                 "status": True,
                 "file_id": document.file_id,
@@ -439,6 +570,13 @@ async def embed_local_file(
                 "known_type": known_type,
             }
         else:
+            # Send webhook callback for failure
+            await send_webhook_callback(
+                file_id=document.file_id,
+                embedded=False,
+                namespace=effective_namespace,
+                error=ERROR_MESSAGES.DEFAULT()
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=ERROR_MESSAGES.DEFAULT(),
@@ -449,9 +587,24 @@ async def embed_local_file(
             http_exc.status_code,
             http_exc.detail,
         )
+        # Send webhook callback for failure
+        await send_webhook_callback(
+            file_id=document.file_id,
+            embedded=False,
+            namespace=effective_namespace,
+            error=str(http_exc.detail)
+        )
         raise http_exc
     except Exception as e:
         logger.error(e)
+        error_detail = ERROR_MESSAGES.PANDOC_NOT_INSTALLED if "No pandoc was found" in str(e) else ERROR_MESSAGES.DEFAULT(e)
+        # Send webhook callback for failure
+        await send_webhook_callback(
+            file_id=document.file_id,
+            embedded=False,
+            namespace=effective_namespace,
+            error=error_detail
+        )
         if "No pandoc was found" in str(e):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -470,7 +623,12 @@ async def embed_file(
     file_id: str = Form(...),
     file: UploadFile = File(...),
     entity_id: str = Form(None),
+    namespace: str = Form(None),
+    x_namespace: str = Header(None, alias="X-Namespace"),
 ):
+    # Priority: Form > Header > Default
+    effective_namespace = namespace or x_namespace or "general"
+
     response_status = True
     response_message = "File processed successfully."
     known_type = None
@@ -493,14 +651,23 @@ async def embed_file(
         result = await store_data_in_vector_db(
             data=data,
             file_id=file_id,
+            source_path=temp_file_path,
             user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
+            namespace=effective_namespace,
         )
 
         if not result:
             response_status = False
             response_message = "Failed to process/store the file data."
+            # Send webhook callback for failure
+            await send_webhook_callback(
+                file_id=file_id,
+                embedded=False,
+                namespace=effective_namespace,
+                error="Failed to process/store the file data."
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to process/store the file data.",
@@ -510,11 +677,25 @@ async def embed_file(
             response_message = "Failed to process/store the file data."
             if isinstance(result["error"], str):
                 response_message = result["error"]
-            else:
+            # Send webhook callback for failure
+            await send_webhook_callback(
+                file_id=file_id,
+                embedded=False,
+                namespace=effective_namespace,
+                error=response_message
+            )
+            if not isinstance(result["error"], str):
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="An unspecified error occurred.",
                 )
+        else:
+            # Success! Send webhook callback
+            await send_webhook_callback(
+                file_id=file_id,
+                embedded=True,
+                namespace=effective_namespace
+            )
     except HTTPException as http_exc:
         response_status = False
         response_message = f"HTTP Exception: {http_exc.detail}"
@@ -523,6 +704,14 @@ async def embed_file(
             http_exc.status_code,
             http_exc.detail,
         )
+        # Send webhook callback for failure (if not already sent)
+        if response_message != "Failed to process/store the file data.":
+            await send_webhook_callback(
+                file_id=file_id,
+                embedded=False,
+                namespace=effective_namespace,
+                error=str(http_exc.detail)
+            )
         raise http_exc
     except Exception as e:
         response_status = False
@@ -531,6 +720,13 @@ async def embed_file(
             "Error during file processing: %s\nTraceback: %s",
             str(e),
             traceback.format_exc(),
+        )
+        # Send webhook callback for failure
+        await send_webhook_callback(
+            file_id=file_id,
+            embedded=False,
+            namespace=effective_namespace,
+            error=str(e)
         )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -617,9 +813,10 @@ async def embed_file_upload(
         )
 
         result = await store_data_in_vector_db(
-            data,
-            file_id,
-            user_id,
+            data=data,
+            file_id=file_id,
+            source_path=temp_file_path,
+            user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
         )

@@ -5,9 +5,8 @@ from app.services.vector_store.async_pg_vector import AsyncPgVector
 
 # Set environment variables early so config picks up test settings.
 os.environ["TESTING"] = "1"
-# Set DB_HOST (and DSN) to dummy values to avoid real connection attempts.
-os.environ["DB_HOST"] = "localhost"  # or any dummy value
-os.environ["DSN"] = "dummy://"
+# Set DATABASE_URL to dummy value for testing (avoids real connection attempts)
+os.environ["DATABASE_URL"] = "postgresql://testuser:testpass@localhost:5432/testdb"
 
 # -- Patch the vector store classes to bypass DB connection --
 

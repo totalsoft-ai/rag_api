@@ -24,6 +24,7 @@ class StoreDocument(BaseModel):
     filename: str
     file_content_type: str
     file_id: str
+    namespace: Optional[str] = "general"
 
 
 class QueryRequestBody(BaseModel):
@@ -31,6 +32,7 @@ class QueryRequestBody(BaseModel):
     file_id: str
     k: int = 4
     entity_id: Optional[str] = None
+    namespace: Optional[str] = None
 
 
 class CleanupMethod(str, Enum):
@@ -42,3 +44,4 @@ class QueryMultipleBody(BaseModel):
     query: str
     file_ids: List[str]
     k: int = 4
+    namespace: Optional[str] = None
