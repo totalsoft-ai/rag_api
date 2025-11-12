@@ -11,7 +11,9 @@ services:
       - "5433:5432"
 
   fastapi:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.lite
     environment:
       - DATABASE_URL=postgresql://myuser:mypassword@db:5432/mydatabase
     ports:
