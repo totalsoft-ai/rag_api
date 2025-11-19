@@ -98,6 +98,11 @@ jobs:
           export IMAGE_TAG="${IMAGE_TAG}"
           envsubst < k8s/manifest.yaml | kubectl apply -f -
 
+      - name: Restart deployment
+        shell: bash
+        run: |
+          kubectl rollout restart deployment/rag-agent --namespace "${{ vars.NAMESPACE }}"
+          
       - name: Wait for rollout
         shell: bash
         run: |
