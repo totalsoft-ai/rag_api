@@ -363,6 +363,15 @@ async def query_embeddings_by_file_id(
             filter_file_id=body.file_id
         )
 
+        # Fallback to text search if no embeddings found and allow_text_search is enabled
+        if not documents and body.allow_text_search:
+            logger.info(f"No vector results found, falling back to text search for query: {body.query}")
+            documents = await ns_vector_store.text_search(
+                query=body.query,
+                k=body.k,
+                filter_file_id=body.file_id
+            )
+        
         if not documents:
             return []
 

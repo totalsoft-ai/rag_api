@@ -203,12 +203,12 @@ class NamespacePgVector:
 
             results = await conn.fetch(f"""
                 SELECT chunk_id, file_id, source, chunk_index, text,
-                       1 - (embedding <=> $1) as similarity
+                       1 - (embedding <=> $1::vector) as similarity
                 FROM {DB_SCHEMA}.embeddings
                 {where_clause}
-                ORDER BY embedding <=> $1
+                ORDER BY embedding <=> $1::vector
                 LIMIT $2
-            """, query_embedding, k)
+            """, _embedding_to_pgvector_string(query_embedding), k)
 
             documents = [
                 Document(
@@ -225,6 +225,61 @@ class NamespacePgVector:
                 for row in results
             ]
 
+            return documents
+
+    async def text_search(
+        self,
+        query: str,
+        k: int = 4,
+        filter_file_id: Optional[str] = None,
+        filter_source: Optional[str] = None
+    ) -> List[Document]:
+        """Search for documents using text matching (ILIKE) when embeddings are not available
+        
+        Args:
+            query: Search query text
+            k: Number of results to return
+            filter_file_id: Optional file_id to filter by
+            filter_source: Optional source path to filter by
+        """
+        pool = await PSQLDatabase.get_pool()
+        async with pool.acquire() as conn:
+            # Build query with optional file_id or source filter
+            where_clause = f"WHERE namespace = '{self.namespace}'"
+            if filter_file_id:
+                where_clause += f" AND file_id = '{filter_file_id}'"
+            elif filter_source:
+                where_clause += f" AND source = '{filter_source}'"
+            
+            # Escape single quotes in query for SQL safety
+            escaped_query = query.replace("'", "''")
+            
+            # Use ILIKE for case-insensitive text search
+            results = await conn.fetch(f"""
+                SELECT chunk_id, file_id, source, chunk_index, text
+                FROM {DB_SCHEMA}.embeddings
+                {where_clause}
+                AND text ILIKE $1
+                ORDER BY chunk_index
+                LIMIT $2
+            """, f'%{escaped_query}%', k)
+            
+            documents = [
+                Document(
+                    page_content=row['text'],
+                    metadata={
+                        'chunk_id': row['chunk_id'],
+                        'file_id': row['file_id'],
+                        'source': row['source'],
+                        'chunk_index': row['chunk_index'],
+                        'similarity': 0.5,  # Default similarity for text search
+                        'namespace': self.namespace,
+                        'search_type': 'text'
+                    }
+                )
+                for row in results
+            ]
+            
             return documents
 
     async def delete_by_file_id(self, file_id: str):

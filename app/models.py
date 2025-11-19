@@ -29,10 +29,11 @@ class StoreDocument(BaseModel):
 
 class QueryRequestBody(BaseModel):
     query: str
-    file_id: str
+    file_id: Optional[str] = None  # Optional: when None, searches across all documents in namespace
     k: int = 4
     entity_id: Optional[str] = None
     namespace: Optional[str] = None
+    allow_text_search: Optional[bool] = False  # Fallback to text search if no embeddings found
 
 
 class CleanupMethod(str, Enum):
