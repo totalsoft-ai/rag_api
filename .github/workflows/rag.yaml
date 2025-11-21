@@ -83,9 +83,16 @@ jobs:
         env:
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
         run: |
-          # Build Docker image
-          docker build -f Dockerfile.lite -t "${{ vars.REGISTRY }}/rag-agent:${IMAGE_TAG}" .
-          docker push "${{ vars.REGISTRY }}/rag-agent:${IMAGE_TAG}"
+          # Build Docker image (quiet mode returns only image ID)
+          image_id=$(docker build -q -f Dockerfile.lite .)
+
+          # Tag and push to local registry
+          docker tag $image_id "${{ vars.REGISTRY }}/${{ github.repository }}:${IMAGE_TAG}"
+          docker push "${{ vars.REGISTRY }}/${{ github.repository }}:${IMAGE_TAG}"
+
+          # Tag and push to Azure registry
+          docker tag $image_id "${{ vars.AZURE_REGISTRY }}/${{ github.repository }}:${IMAGE_TAG}"
+          docker push "${{ vars.AZURE_REGISTRY }}/${{ github.repository }}:${IMAGE_TAG}"
 
       - name: Apply manifests
         shell: bash
