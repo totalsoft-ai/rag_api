@@ -412,14 +412,24 @@ class NamespacePgVector:
         """Count documents with the given file_id (with fallback to source for backward compatibility)"""
         pool = await PSQLDatabase.get_pool()
         async with pool.acquire() as conn:
-            # First try by file_id
+            # First try by file_id in main embeddings table
             count = await conn.fetchval(f"""
                 SELECT COUNT(*)
                 FROM {DB_SCHEMA}.embeddings
                 WHERE namespace = $1 AND file_id = $2
             """, self.namespace, file_id)
 
-            # If not found and file_id looks like a path, try by source as fallback
+            # If not found in main table, check namespace-specific table
+            if count == 0:
+                count = await conn.fetchval(f"""
+                    SELECT COUNT(*)
+                    FROM {DB_SCHEMA}.{self.safe_namespace}
+                    WHERE file_id = $1
+                """, file_id)
+                if count > 0:
+                    logger.info(f"Found {count} documents in namespace table for file_id: {file_id}")
+
+            # If still not found and file_id looks like a path, try by source as fallback
             if count == 0 and ('/' in file_id or '\\' in file_id):
                 logger.info(f"No results by file_id, trying source fallback for: {file_id}")
                 count = await conn.fetchval(f"""
