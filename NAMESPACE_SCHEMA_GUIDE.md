@@ -55,7 +55,7 @@ langchain_pg_embedding (
 - Documents are stored in both:
   - Main `embeddings` table (all namespaces)
   - Namespace-specific table (e.g., `project_a`)
-- Automatic copy to 'general' namespace (unless namespace is 'general' or contains 'totalsoft')
+- ~~Automatic copy to 'general' namespace (unless namespace is 'general' or contains 'totalsoft')~~ **[DISABLED]**
 
 ### 2. Chunk Identification
 - **chunk_id**: Unique UUID per chunk (not shared across chunks of the same file)
@@ -165,8 +165,8 @@ Characters are automatically converted for SQL table names:
 - Lowercase conversion
 
 ### Reserved Namespaces
-- `general`: Default namespace, receives copies from other namespaces
-- Namespaces containing `totalsoft`: Do not auto-copy to 'general'
+- `general`: Default namespace ~~, receives copies from other namespaces~~ **[Auto-copy disabled]**
+- ~~Namespaces containing `totalsoft`: Do not auto-copy to 'general'~~ **[Auto-copy feature disabled]**
 
 ## Data Flow
 
@@ -179,8 +179,9 @@ Characters are automatically converted for SQL table names:
 3. Chunks stored in:
    - public.embeddings (namespace='project-a')
    - public.project_a (namespace='project-a')
-   - public.embeddings (namespace='general')  ← Auto-copy
-   - public.general (namespace='general')     ← Auto-copy
+   # Auto-copy to 'general' is DISABLED:
+   # - public.embeddings (namespace='general')  ← Auto-copy [DISABLED]
+   # - public.general (namespace='general')     ← Auto-copy [DISABLED]
 ```
 
 ### Query Flow

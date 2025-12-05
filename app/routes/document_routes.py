@@ -356,12 +356,19 @@ async def query_embeddings_by_file_id(
         namespace = body.namespace or x_namespace or "general"
         ns_vector_store = NamespacePgVector(embeddings=embeddings, namespace=namespace)
 
+        # Log search parameters for debugging
+        if body.file_id:
+            logger.info(f"Searching in namespace '{namespace}' for file_id '{body.file_id}' with query: {body.query[:50]}...")
+        else:
+            logger.info(f"Searching across ALL documents in namespace '{namespace}' with query: {body.query[:50]}...")
+
         # Search in the specified namespace, filtering by file_id
         documents = await ns_vector_store.similarity_search(
             query=body.query,
             k=body.k,
             filter_file_id=body.file_id
         )
+        logger.info(f"Found {len(documents)} documents from vector search")
 
         # Fallback to text search if no embeddings found and allow_text_search is enabled
         if not documents and body.allow_text_search:
@@ -501,12 +508,12 @@ async def store_data_in_vector_db(
         ns_vector_store = NamespacePgVector(embeddings=embeddings, namespace=namespace)
 
         # Copy to 'general' namespace if not 'totalsoft' related
-        copy_to_general = namespace != 'general' and 'totalsoft' not in namespace.lower()
+        # copy_to_general = namespace != 'general' and 'totalsoft' not in namespace.lower()
 
         await ns_vector_store.upsert_documents(
             documents=docs,
             chunk_indices=[doc.metadata["chunk_index"] for doc in docs],
-            copy_to_general=copy_to_general
+            copy_to_general=False  # Disabled: Documents no longer copied to 'general' namespace
         )
 
         chunk_ids = [doc.metadata["chunk_id"] for doc in docs]
