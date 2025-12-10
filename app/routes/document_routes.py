@@ -1,5 +1,6 @@
 # app/routes/document_routes.py
 import os
+import json
 import hashlib
 import traceback
 import aiofiles
@@ -352,6 +353,13 @@ async def query_embeddings_by_file_id(
     authorized_documents = []
 
     try:
+        # Validate query is not empty
+        if not body.query or not body.query.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Query cannot be empty"
+            )
+
         # Priority: Body > Header > Default
         namespace = body.namespace or x_namespace or "general"
         ns_vector_store = NamespacePgVector(embeddings=embeddings, namespace=namespace)
@@ -492,13 +500,14 @@ async def store_data_in_vector_db(
             Document(
                 page_content=doc.page_content,
                 metadata={
+                    **(doc.metadata or {}),  # First spread original metadata
+                    # Then override with our explicit values (these take precedence)
                     "chunk_id": chunk_id,
                     "file_id": file_id,  # UUID for file (MongoDB sync)
-                    "source": source_path,  # File path for info
+                    "source": source_path,  # File path for info (override loader's source)
                     "chunk_index": idx,
                     "user_id": user_id,
                     "digest": generate_digest(doc.page_content),
-                    **(doc.metadata or {}),
                 },
             )
         )
@@ -641,6 +650,7 @@ async def embed_file(
     entity_id: str = Form(None),
     namespace: str = Form(None),
     x_namespace: str = Header(None, alias="X-Namespace"),
+    storage_metadata: str = Form(None),
 ):
     # Priority: Form > Header > Default
     effective_namespace = namespace or x_namespace or "general"
@@ -656,6 +666,21 @@ async def embed_file(
 
     await save_upload_file_async(file, temp_file_path)
 
+    # Parse storage_metadata if provided
+    source_path_for_db = None
+    if storage_metadata:
+        try:
+            metadata = json.loads(storage_metadata)
+            source_path_for_db = metadata.get('source')
+            if source_path_for_db:
+                logger.info(f"Using storage_metadata.source for PostgreSQL: {source_path_for_db}")
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse storage_metadata, falling back to temp path: {e}")
+
+    # Fallback to temp file path if not provided
+    if not source_path_for_db:
+        source_path_for_db = temp_file_path
+
     try:
         data, known_type, file_ext = await load_file_content(
             file.filename,
@@ -664,10 +689,12 @@ async def embed_file(
             request.app.state.thread_pool,
         )
 
+        logger.debug(f"Storing documents with source: {source_path_for_db} (from storage_metadata: {storage_metadata is not None})")
+
         result = await store_data_in_vector_db(
             data=data,
             file_id=file_id,
-            source_path=temp_file_path,
+            source_path=source_path_for_db,
             user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
@@ -875,6 +902,13 @@ async def embed_file_upload(
 @router.post("/query_multiple")
 async def query_embeddings_by_file_ids(request: Request, body: QueryMultipleBody):
     try:
+        # Validate query is not empty
+        if not body.query or not body.query.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Query cannot be empty"
+            )
+
         # Get the embedding of the query text
         embedding = get_cached_query_embedding(body.query)
 
