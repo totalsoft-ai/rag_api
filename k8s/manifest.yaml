@@ -21,7 +21,7 @@ spec:
         - name: registry-creds
       containers:
       - name: rag-agent
-        image: ${REGISTRY}/totalsoft-ai/rag-api:${IMAGE_TAG}
+        image: ${REGISTRY}/totalsoft-ai/rag_api:${IMAGE_TAG}
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
