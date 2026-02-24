@@ -29,10 +29,10 @@ spec:
         resources:
           requests:
             cpu: "250m"
-            memory: "256Mi"
+            memory: "512Mi"
           limits:
             cpu: "500m"
-            memory: "512Mi"
+            memory: "1Gi"
         readinessProbe:
           httpGet:
             path: /health
@@ -75,10 +75,10 @@ metadata:
   namespace: ${NAMESPACE}
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/proxy-body-size: "512m"   # sau 0 pentru nelimitat
+    nginx.ingress.kubernetes.io/proxy-body-size: "512m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60" # 1 min - standard
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
 spec:
   ingressClassName: nginx
   rules:
