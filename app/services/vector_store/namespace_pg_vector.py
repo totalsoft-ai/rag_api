@@ -130,45 +130,45 @@ class NamespacePgVector:
             logger.info(f"Successfully upserted to namespace table '{self.safe_namespace}'")
 
             # Copy to 'general' namespace if requested and not already 'general' or 'totalsoft'
-            if copy_to_general and self.namespace != 'general' and 'totalsoft' not in self.namespace.lower():
-                general_values = [
-                    (v[0], v[1], v[2], v[3], v[4], v[5], 'general')  # Replace namespace with 'general'
-                    for v in values
-                ]
-
-                # Create general namespace table if needed
-                await create_namespace_table('general')
-
-                logger.info(f"Upserting {len(general_values)} items to 'general' namespace")
-                await conn.executemany(
-                    f"""
-                    INSERT INTO {DB_SCHEMA}.embeddings (chunk_id, file_id, source, chunk_index, text, embedding, namespace)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    ON CONFLICT (chunk_id) DO UPDATE
-                    SET file_id = EXCLUDED.file_id,
-                        source = EXCLUDED.source,
-                        chunk_index = EXCLUDED.chunk_index,
-                        text = EXCLUDED.text,
-                        embedding = EXCLUDED.embedding,
-                        namespace = EXCLUDED.namespace
-                    """,
-                    general_values
-                )
-                await conn.executemany(
-                    f"""
-                    INSERT INTO {DB_SCHEMA}.general (chunk_id, file_id, source, chunk_index, text, embedding, namespace)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    ON CONFLICT (chunk_id) DO UPDATE
-                    SET file_id = EXCLUDED.file_id,
-                        source = EXCLUDED.source,
-                        chunk_index = EXCLUDED.chunk_index,
-                        text = EXCLUDED.text,
-                        embedding = EXCLUDED.embedding,
-                        namespace = EXCLUDED.namespace
-                    """,
-                    general_values
-                )
-                logger.info(f"Also added {len(general_values)} documents to 'general' namespace")
+            # if copy_to_general and self.namespace != 'general' and 'totalsoft' not in self.namespace.lower():
+            #     general_values = [
+            #         (v[0], v[1], v[2], v[3], v[4], v[5], 'general')  # Replace namespace with 'general'
+            #         for v in values
+            #     ]
+            #
+            #     # Create general namespace table if needed
+            #     await create_namespace_table('general')
+            #
+            #     logger.info(f"Upserting {len(general_values)} items to 'general' namespace")
+            #     await conn.executemany(
+            #         f"""
+            #         INSERT INTO {DB_SCHEMA}.embeddings (chunk_id, file_id, source, chunk_index, text, embedding, namespace)
+            #         VALUES ($1, $2, $3, $4, $5, $6, $7)
+            #         ON CONFLICT (chunk_id) DO UPDATE
+            #         SET file_id = EXCLUDED.file_id,
+            #             source = EXCLUDED.source,
+            #             chunk_index = EXCLUDED.chunk_index,
+            #             text = EXCLUDED.text,
+            #             embedding = EXCLUDED.embedding,
+            #             namespace = EXCLUDED.namespace
+            #         """,
+            #         general_values
+            #     )
+            #     await conn.executemany(
+            #         f"""
+            #         INSERT INTO {DB_SCHEMA}.general (chunk_id, file_id, source, chunk_index, text, embedding, namespace)
+            #         VALUES ($1, $2, $3, $4, $5, $6, $7)
+            #         ON CONFLICT (chunk_id) DO UPDATE
+            #         SET file_id = EXCLUDED.file_id,
+            #             source = EXCLUDED.source,
+            #             chunk_index = EXCLUDED.chunk_index,
+            #             text = EXCLUDED.text,
+            #             embedding = EXCLUDED.embedding,
+            #             namespace = EXCLUDED.namespace
+            #         """,
+            #         general_values
+            #     )
+            #     logger.info(f"Also added {len(general_values)} documents to 'general' namespace")
 
     async def similarity_search(
         self,

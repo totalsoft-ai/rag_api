@@ -1,7 +1,7 @@
 # app/models.py
 import hashlib
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 
 
@@ -35,6 +35,13 @@ class QueryRequestBody(BaseModel):
     namespace: Optional[str] = None
     allow_text_search: Optional[bool] = False  # Fallback to text search if no embeddings found
 
+    @field_validator('query')
+    @classmethod
+    def query_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError('Query cannot be empty')
+        return v
+
 
 class CleanupMethod(str, Enum):
     incremental = "incremental"
@@ -46,3 +53,10 @@ class QueryMultipleBody(BaseModel):
     file_ids: List[str]
     k: int = 4
     namespace: Optional[str] = None
+
+    @field_validator('query')
+    @classmethod
+    def query_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError('Query cannot be empty')
+        return v

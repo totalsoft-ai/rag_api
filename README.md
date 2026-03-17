@@ -25,7 +25,7 @@ The API supports organizing documents into **namespaces** for better multi-tenan
 ### Key Features:
 - **Per-namespace tables**: Each namespace gets its own table (e.g., `public.project_a`)
 - **Main embeddings table**: All namespaces also stored in central `public.embeddings` table
-- **Auto-copy to 'general'**: Documents automatically copied to 'general' namespace (unless namespace contains 'totalsoft')
+- **~~Auto-copy to 'general'~~**: ~~Documents automatically copied to 'general' namespace (unless namespace contains 'totalsoft')~~ **[DISABLED]**
 - **Configurable schema**: Use `DB_SCHEMA` environment variable to set PostgreSQL schema (default: `public`)
 - **Query filtering**: Queries filter results by namespace and optionally by file_id (source)
 - **DELETE isolation**: Delete operations are isolated per namespace - users can only delete documents from their own namespace
