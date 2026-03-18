@@ -84,7 +84,8 @@ jobs:
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
         run: |
           # Build Docker image (quiet mode returns only image ID)
-          image_id=$(docker build -q -f Dockerfile.lite .)
+          docker build --progress=plain -f Dockerfile.lite . --iidfile /tmp/iid
+          image_id=$(cat /tmp/iid)
 
           # Tag and push to local registry
           docker tag $image_id "${{ vars.REGISTRY }}/${{ github.repository }}:${IMAGE_TAG}"
