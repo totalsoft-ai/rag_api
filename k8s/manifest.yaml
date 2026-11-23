@@ -68,27 +68,26 @@ spec:
   selector:
     app: rag-agent
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# Route through the cluster's shared Gateway API gateway (gateway/shared, Envoy
+# Gateway — replaced ingress-nginx in Nov 2026). No TLS section on this host, so
+# the route attaches to both the HTTP and HTTPS listeners (HTTPS uses the
+# gateway's default *.totalsoft.local certificate), as the old Ingress did.
+#
+# - The old `rewrite-target: /` on path `/` was a no-op in ingress-nginx; dropped.
+# - The 512m `proxy-body-size` is intentionally not carried over: Envoy streams
+#   request bodies with no size cap, and buffering 512 MiB in the gateway's
+#   memory per upload is not safe. The app enforces its own limits.
+# - 6000s request timeout (as translated from the old proxy timeouts).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: rag-agent
   namespace: ${NAMESPACE}
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/proxy-body-size: "512m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
 spec:
-  ingressClassName: nginx
+  parentRefs:
+    - {name: shared, namespace: gateway}
+  hostnames: ["${HOST}"]
   rules:
-  - host: ${HOST}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: rag-service
-            port:
-              number: 80
+    - matches: [{path: {type: PathPrefix, value: /}}]
+      timeouts: {request: 6000s}
+      backendRefs: [{name: rag-service, port: 80}]
